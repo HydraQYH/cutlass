@@ -114,8 +114,8 @@ using         LayoutB     = cutlass::layout::ColumnMajor;                   // L
 constexpr int AlignmentB  = 128 / cutlass::sizeof_bits<ElementB>::value;    // Memory access granularity/alignment of B matrix in units of elements (up to 16 bytes)
 
 // C matrix configuration
-using         ElementC    = cutlass::float_e4m3_t;                          // Element type for C and D matrix operands
-using         LayoutC     = cutlass::layout::ColumnMajor;                   // Layout type for C and D matrix operands
+using         ElementC    = cutlass::bfloat16_t;                          // Element type for C and D matrix operands
+using         LayoutC     = cutlass::layout::RowMajor;                   // Layout type for C and D matrix operands
 constexpr int AlignmentC  = 128 / cutlass::sizeof_bits<ElementC>::value;    // Memory access granularity/alignment of C matrix in units of elements (up to 16 bytes)
 
 // D matrix configuration
@@ -130,8 +130,8 @@ using ElementCompute      = float;                                          // E
 
 using ArchTag       = cutlass::arch::Sm90;                          // Tag indicating the minimum SM that supports the intended feature
 using OperatorClass = cutlass::arch::OpClassTensorOp;               // Operator class tag
-using TileShape     = Shape<_128,_128,_128>;                        // Threadblock-level tile size
-using ClusterShape  = Shape<_1,_2,_1>;                              // Shape of the threadblocks in a cluster
+using TileShape     = Shape<_64,_128,_128>;                        // Threadblock-level tile size
+using ClusterShape  = Shape<_2,_1,_1>;                              // Shape of the threadblocks in a cluster
 
 constexpr int ScaleGranularityM = 1;
 constexpr int ScaleGranularityN = 128;
@@ -145,20 +145,27 @@ using ScaleConfig   = cutlass::detail::Sm90BlockwiseScaleConfig<ScaleGranularity
 using LayoutSFA     = decltype(ScaleConfig::deduce_layoutSFA());    // Layout type for SFA matrix operand
 using LayoutSFB     = decltype(ScaleConfig::deduce_layoutSFB());    // Layout type for SFB matrix operand
 
-using KernelSchedule    = cutlass::gemm::KernelPtrArrayTmaWarpSpecializedCooperativeFP8BlockScaledAccum;
-using EpilogueSchedule  = cutlass::epilogue::PtrArrayTmaWarpSpecializedCooperative;
+using KernelSchedule    = cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpongFP8BlockScaledAccum;
+using EpilogueSchedule  = cutlass::epilogue::PtrArrayTmaWarpSpecializedPingpong;
 using EpilogueTileType  = cutlass::epilogue::collective::EpilogueTileAuto;
 using FusionOperation   = cutlass::epilogue::fusion::LinearCombination<ElementC, ElementAccumulator>;
+
+static constexpr auto RoundStyle = cutlass::FloatRoundStyle::round_to_nearest;
+using CustomEVTIdentity =  // acc
+  cutlass::epilogue::fusion::Sm90EVT<
+    cutlass::epilogue::fusion::Sm90Compute<cutlass::epilogue::thread::Identity, ElementD, ElementCompute, RoundStyle>, // beta * C + (alpha * acc)
+    cutlass::epilogue::fusion::Sm90AccFetch
+  >;
 
 using CollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBuilder<
     ArchTag, OperatorClass,
     TileShape, ClusterShape,
     EpilogueTileType,
     ElementAccumulator, ElementCompute,
-    ElementC, LayoutC *, AlignmentC,
+    void, LayoutC *, AlignmentC,
     ElementD, LayoutD *, AlignmentD,
     EpilogueSchedule,
-    FusionOperation
+    CustomEVTIdentity
   >::CollectiveOp;
 
 using CollectiveMainloopWithGroupWiseScaling = typename cutlass::gemm::collective::CollectiveBuilder<
@@ -183,8 +190,9 @@ using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
 
 
 // Extract information from Gemm kernel.
-using EpilogueOutputOp  = typename Gemm::EpilogueOutputOp;
-using ElementScalar     = typename EpilogueOutputOp::ElementScalar;
+// using EpilogueOutputOp  = typename Gemm::EpilogueOutputOp;
+// using ElementScalar     = typename EpilogueOutputOp::ElementScalar;
+using ElementScalar     = ElementAccumulator;
 
 using StrideA = typename Gemm::GemmKernel::InternalStrideA;
 using StrideB = typename Gemm::GemmKernel::InternalStrideB;
@@ -484,37 +492,18 @@ GemmArguments args_from_options(const OptionType &options, bool host_problem_sha
     },
     {
       {}, // epilogue.thread
-      ptr_C.get(), stride_C.get(),
+      // ptr_C.get(), stride_C.get(),
+      nullptr, nullptr,
       ptr_D.get(), stride_D.get()
     },
     kernel_hw_info
   };
 
-  auto &fusion_args = arguments.epilogue.thread;
-  if (options.alpha != FLT_MAX && options.beta != FLT_MAX) {
-    // If both alpha/beta are provided (via cmd line args) and are scalar, i.e., same alpha/beta applies to all batches.
-    fusion_args.alpha = options.alpha;
-    fusion_args.beta = options.beta;
-    fusion_args.alpha_ptr = nullptr;
-    fusion_args.beta_ptr = nullptr;
-    fusion_args.alpha_ptr_array = nullptr;
-    fusion_args.beta_ptr_array = nullptr;
-    // Single alpha and beta for all groups
-    fusion_args.dAlpha = {cute::_0{}, cute::_0{}, 0};
-    fusion_args.dBeta = {cute::_0{}, cute::_0{}, 0};
-  }
-  else {
-    // If pointers to alpha/beta are provided, i.e., alpha/beta can differ between batches/groups.
-    fusion_args.alpha = 0;
-    fusion_args.beta = 0;
-    fusion_args.alpha_ptr = nullptr;
-    fusion_args.beta_ptr = nullptr;
-    fusion_args.alpha_ptr_array = alpha_device.get();
-    fusion_args.beta_ptr_array = beta_device.get();
-    // One alpha and beta per each group
-    fusion_args.dAlpha = {cute::_0{}, cute::_0{}, 1};
-    fusion_args.dBeta = {cute::_0{}, cute::_0{}, 1};
-  }
+  arguments.epilogue.thread =
+    {    // unitary op : acc
+      {}, // leaf op+args : acc
+      {}  // identify
+    };   // end unitary op
 
   arguments.scheduler.raster_order = options.raster_order;
   // The tile scheduler will swizzle up to 8 and with the nearest multiple of 2 (i.e., 1, 2, 4, and 8)
