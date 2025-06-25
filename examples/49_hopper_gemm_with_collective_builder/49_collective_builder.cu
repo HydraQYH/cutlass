@@ -302,7 +302,7 @@ struct ExampleRunner {
   
   using CustomEVTIdentity =  // acc
     cutlass::epilogue::fusion::Sm90EVT<
-      cutlass::epilogue::fusion::Sm90Compute<cutlass::identity_value_op, ElementD, ElementCompute, RoundStyle>, // beta * C + (alpha * acc)
+      cutlass::epilogue::fusion::Sm90Compute<cutlass::epilogue::thread::Identity, ElementD, ElementCompute, RoundStyle>, // beta * C + (alpha * acc)
       cutlass::epilogue::fusion::Sm90AccFetch
     >;
   
