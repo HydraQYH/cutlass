@@ -451,7 +451,6 @@ public:
 
   CUTLASS_DEVICE
   bool is_last_tile(WorkTileInfo& work_tile_info, uint32_t advance_count = 1) const {
-    // TODO: Complete this part
     return false;
   }
 
