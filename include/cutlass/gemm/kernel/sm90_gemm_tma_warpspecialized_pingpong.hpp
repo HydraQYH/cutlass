@@ -800,6 +800,7 @@ public:
     else if (warp_group_role == WarpGroupRole::Consumer0 || warp_group_role == WarpGroupRole::Consumer1) {
       cutlass::arch::warpgroup_reg_alloc<MmaRegisterRequirement>();
 
+      #ifdef CUTLASS_ENABLE_GDC_FOR_SM90
       // It is possible to have work tiles start off invalid,
       // so we have to check that first.
       if (not work_tile_info.is_valid()) {
@@ -810,6 +811,7 @@ public:
 
         return;
       }
+      #endif
       
       if constexpr (IsSchedDynamicPersistent) {
         // Consumer0's initial tile is static. It starts consuming the 2nd tile.
